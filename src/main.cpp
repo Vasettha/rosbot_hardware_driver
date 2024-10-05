@@ -16,7 +16,13 @@
 
 volatile int enc_val_l = 0;
 volatile int enc_val_r = 0;
-const float Kp = 300.0; // Proportional gain for closed-loop control
+const double Kp_l = 23.0; 
+const double Ki_l = 3.0;
+const double Kd_l = 2.0;
+
+const double Kp_r = 24.0; 
+const double Ki_r = 3.0;
+const double Kd_r = 2.0;
 
 void IRAM_ATTR ENC_L() {
   if (digitalRead(ENC_L1) == digitalRead(ENC_L2)) {
@@ -32,26 +38,6 @@ void IRAM_ATTR ENC_R() {
   } else {
     enc_val_r--;
   }
-}
-
-void setup() {
-  Serial.begin(115200);
-  pinMode(ENC_L1, INPUT_PULLUP);
-  pinMode(ENC_L2, INPUT_PULLUP);
-  pinMode(ENC_R1, INPUT_PULLUP);
-  pinMode(ENC_R2, INPUT_PULLUP);
-  
-  ledcAttachPin(MOTOR_L1_PIN, MOTOR_L1);
-  ledcAttachPin(MOTOR_L2_PIN, MOTOR_L2);
-  ledcSetup(MOTOR_L1, 20000, 8);
-  ledcSetup(MOTOR_L2, 20000, 8);
-  ledcAttachPin(MOTOR_R1_PIN, MOTOR_R1);
-  ledcAttachPin(MOTOR_R2_PIN, MOTOR_R2);
-  ledcSetup(MOTOR_R1, 20000, 8);
-  ledcSetup(MOTOR_R2, 20000, 8);
-  
-  attachInterrupt(digitalPinToInterrupt(ENC_L1), ENC_L, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENC_R1), ENC_R, RISING);
 }
 
 void setMotorSpeed(int motor1, int motor2, int speed) {
@@ -78,8 +64,8 @@ void openLoopControl(int speed_left, int speed_right) {
 }
 
 void readEncoders() {
-  float left_distance = (enc_val_l / PULSE_PER_METER) * 1000.0;
-  float right_distance = (enc_val_r / PULSE_PER_METER) * 1000.0;
+  double left_distance = (enc_val_l / PULSE_PER_METER) * 1000.0;
+  double right_distance = (enc_val_r / PULSE_PER_METER) * 1000.0;
   Serial.print("Left encoder (mm): ");
   Serial.print(left_distance);
   Serial.print(" Right encoder (mm): ");
@@ -92,11 +78,38 @@ void resetEncoders() {
   Serial.println("Encoders reset");
 }
 
-void closedLoopSpeedControl(int base_speed) {
-  int prev_enc_left = enc_val_l;
-  int prev_enc_right = enc_val_r;
-  unsigned long prev_time = millis();
+void setup() {
+  Serial.begin(9600);
+  pinMode(ENC_L1, INPUT_PULLUP);
+  pinMode(ENC_L2, INPUT_PULLUP);
+  pinMode(ENC_R1, INPUT_PULLUP);
+  pinMode(ENC_R2, INPUT_PULLUP);
+  
+  ledcAttachPin(MOTOR_L1_PIN, MOTOR_L1);
+  ledcAttachPin(MOTOR_L2_PIN, MOTOR_L2);
+  ledcSetup(MOTOR_L1, 20000, 8);
+  ledcSetup(MOTOR_L2, 20000, 8);
+  ledcAttachPin(MOTOR_R1_PIN, MOTOR_R1);
+  ledcAttachPin(MOTOR_R2_PIN, MOTOR_R2);
+  ledcSetup(MOTOR_R1, 20000, 8);
+  ledcSetup(MOTOR_R2, 20000, 8);
+  
+  attachInterrupt(digitalPinToInterrupt(ENC_L1), ENC_L, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_R1), ENC_R, RISING);
+}
 
+
+void closedLoopSpeedControl(int pulse_per_cycle_left, int pulse_per_cycle_right) {
+  double Ierror_l = 0.0;
+  double Ierror_r = 0.0;
+  double prev_error_l = 0.0;
+  double prev_error_r = 0.0;
+  int prev_enc_l = enc_val_l;
+  int prev_enc_r = enc_val_r;
+  unsigned long prev_time = millis();
+  int last_command_millis = millis();
+
+  // || millis() > last_command_millis + 2000
   while (true) {
     if (Serial.available()) {
       setMotorSpeed(MOTOR_L1, MOTOR_L2, 0);
@@ -105,35 +118,36 @@ void closedLoopSpeedControl(int base_speed) {
     }
 
     unsigned long current_time = millis();
-    float dt = (current_time - prev_time) / 1000.0;  // Time difference in seconds
+    double dt = (current_time - prev_time);  // Time difference in milliseconds
 
-    if (dt >= 0.1) {  // Update every 100ms
-      float actual_speed_left = ((enc_val_l - prev_enc_left) / PULSE_PER_METER) / dt;
-      float actual_speed_right = ((enc_val_r - prev_enc_right) / PULSE_PER_METER) / dt;
+    if (dt >= 25) {  // Update every 25ms
+      double error_l = pulse_per_cycle_left - (enc_val_l - prev_enc_l);
+      Ierror_l += error_l;
+      double output_l = ((Kp_l * error_l) + (Kd_l * (error_l - prev_error_l)) + (Ki_l*Ierror_l));
 
-        // Calculate error and adjust motor speeds
-      float error = actual_speed_right - actual_speed_left;
-      int pwm_left = base_speed + int(Kp * error);
-      int pwm_right = base_speed - int(Kp * error);
+      double error_r = pulse_per_cycle_left - (enc_val_r - prev_enc_r);
+      Ierror_r += error_r;
+      double output_r = ((Kp_r * error_r) + (Kd_r * (error_r - prev_error_r)) + (Ki_r*Ierror_r));
 
-      // Ensure motor speeds are within valid range
-      pwm_left = constrain(pwm_left, 0, 255);
-      pwm_right = constrain(pwm_right, 0, 255);
+      output_l = constrain(output_l, -255, 255);
+      output_r = constrain(output_r, -255, 255);
+    
+      setMotorSpeed(MOTOR_L1, MOTOR_L2, output_l);
+      setMotorSpeed(MOTOR_R1, MOTOR_R2, output_r);
 
-      setMotorSpeed(MOTOR_L1, MOTOR_L2, pwm_left);
-      setMotorSpeed(MOTOR_R1, MOTOR_R2, pwm_right);
+      Serial.print(error_l);
+      Serial.print("\t");
+      Serial.println(error_r);
 
-      prev_enc_left = enc_val_l;
-      prev_enc_right = enc_val_r;
+      prev_error_r = error_r;
+      prev_error_l = error_l;
+      prev_enc_r = enc_val_r;
+      prev_enc_l = enc_val_l;
       prev_time = current_time;
 
-      Serial.print("Left speed(m/s): ");
-      Serial.print(actual_speed_left);
-      Serial.print(" Right speed(m/s): ");
-      Serial.println(actual_speed_right);
     }
 
-    delay(10);
+    delay(0.1);
   }
 }
 
@@ -150,8 +164,9 @@ void processSerialCommand() {
   } else if (command == "r") {
     resetEncoders();
   } else if (command.startsWith("m ")) {
-    int base_speed = command.substring(command.lastIndexOf(' ') + 1).toInt();
-    closedLoopSpeedControl(base_speed);
+    int pulse_per_cycle_left = command.substring(2, command.indexOf(' ', 2)).toInt();
+    int pulse_per_cycle_right = command.substring(command.lastIndexOf(' ') + 1).toInt();
+    closedLoopSpeedControl(pulse_per_cycle_left,pulse_per_cycle_right);
   } else {
     Serial.println("Invalid command");
   }
@@ -163,3 +178,4 @@ void loop() {
   }
   delay(10);
 }
+

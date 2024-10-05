@@ -16,13 +16,26 @@
 
 volatile int enc_val_l = 0;
 volatile int enc_val_r = 0;
-const double Kp_l = 23.0; 
-const double Ki_l = 3.0;
-const double Kd_l = 2.0;
+const double Kp_l = 19.0; 
+const double Ki_l = 2.0;
+const double Kd_l = 2.5;
 
-const double Kp_r = 24.0; 
-const double Ki_r = 3.0;
-const double Kd_r = 2.0;
+const double Kp_r = 20.0; 
+const double Ki_r = 2.5;
+const double Kd_r = 2.5;
+// m 20 20
+double Ierror_l = 0.0;
+double Ierror_r = 0.0;
+double prev_error_l = 0.0;
+double prev_error_r = 0.0;
+int prev_enc_l = enc_val_l;
+int prev_enc_r = enc_val_r;
+unsigned long prev_time = millis();
+
+
+int pulse_per_cycle_left = 0;
+int pulse_per_cycle_right = 0;
+bool run_closed_loop = false;
 
 void IRAM_ATTR ENC_L() {
   if (digitalRead(ENC_L1) == digitalRead(ENC_L2)) {
@@ -53,14 +66,6 @@ void setMotorSpeed(int motor1, int motor2, int speed) {
 void openLoopControl(int speed_left, int speed_right) {
   setMotorSpeed(MOTOR_L1, MOTOR_L2, speed_left);
   setMotorSpeed(MOTOR_R1, MOTOR_R2, speed_right);
-  while (true) {
-    if (Serial.available()) {
-      setMotorSpeed(MOTOR_L1, MOTOR_L2, 0);
-      setMotorSpeed(MOTOR_R1, MOTOR_R2, 0);
-      break;  // Exit if new command received
-    }
-  }
-
 }
 
 void readEncoders() {
@@ -98,56 +103,33 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_R1), ENC_R, RISING);
 }
 
+void closedLoopSpeedControl() {
+  unsigned long current_time = millis();
+  double dt = (current_time - prev_time);  // Time difference in milliseconds
+  if (dt >= 25) {  // Update every 25ms
+    double error_l = pulse_per_cycle_left - (enc_val_l - prev_enc_l);
+    Ierror_l += error_l;
+    double output_l = ((Kp_l * error_l) + (Kd_l * (error_l - prev_error_l)) + (Ki_l*Ierror_l));
 
-void closedLoopSpeedControl(int pulse_per_cycle_left, int pulse_per_cycle_right) {
-  double Ierror_l = 0.0;
-  double Ierror_r = 0.0;
-  double prev_error_l = 0.0;
-  double prev_error_r = 0.0;
-  int prev_enc_l = enc_val_l;
-  int prev_enc_r = enc_val_r;
-  unsigned long prev_time = millis();
-  int last_command_millis = millis();
+    double error_r = pulse_per_cycle_right - (enc_val_r - prev_enc_r);
+    Ierror_r += error_r;
+    double output_r = ((Kp_r * error_r) + (Kd_r * (error_r - prev_error_r)) + (Ki_r*Ierror_r));
 
-  // || millis() > last_command_millis + 2000
-  while (true) {
-    if (Serial.available()) {
-      setMotorSpeed(MOTOR_L1, MOTOR_L2, 0);
-      setMotorSpeed(MOTOR_R1, MOTOR_R2, 0);
-      break;  // Exit if new command received
-    }
+    output_l = constrain(output_l, -255, 255);
+    output_r = constrain(output_r, -255, 255);
+  
+    setMotorSpeed(MOTOR_L1, MOTOR_L2, output_l);
+    setMotorSpeed(MOTOR_R1, MOTOR_R2, output_r);
 
-    unsigned long current_time = millis();
-    double dt = (current_time - prev_time);  // Time difference in milliseconds
+    Serial.print(error_l);
+    Serial.print("\t");
+    Serial.println(error_r);
 
-    if (dt >= 25) {  // Update every 25ms
-      double error_l = pulse_per_cycle_left - (enc_val_l - prev_enc_l);
-      Ierror_l += error_l;
-      double output_l = ((Kp_l * error_l) + (Kd_l * (error_l - prev_error_l)) + (Ki_l*Ierror_l));
-
-      double error_r = pulse_per_cycle_left - (enc_val_r - prev_enc_r);
-      Ierror_r += error_r;
-      double output_r = ((Kp_r * error_r) + (Kd_r * (error_r - prev_error_r)) + (Ki_r*Ierror_r));
-
-      output_l = constrain(output_l, -255, 255);
-      output_r = constrain(output_r, -255, 255);
-    
-      setMotorSpeed(MOTOR_L1, MOTOR_L2, output_l);
-      setMotorSpeed(MOTOR_R1, MOTOR_R2, output_r);
-
-      Serial.print(error_l);
-      Serial.print("\t");
-      Serial.println(error_r);
-
-      prev_error_r = error_r;
-      prev_error_l = error_l;
-      prev_enc_r = enc_val_r;
-      prev_enc_l = enc_val_l;
-      prev_time = current_time;
-
-    }
-
-    delay(0.1);
+    prev_error_r = error_r;
+    prev_error_l = error_l;
+    prev_enc_r = enc_val_r;
+    prev_enc_l = enc_val_l;
+    prev_time = current_time;
   }
 }
 
@@ -158,15 +140,28 @@ void processSerialCommand() {
   if (command.startsWith("o ")) {
     int speed_left = command.substring(2, command.indexOf(' ', 2)).toInt();
     int speed_right = command.substring(command.lastIndexOf(' ') + 1).toInt();
+    run_closed_loop = false;
     openLoopControl(speed_left, speed_right);
   } else if (command == "e") {
     readEncoders();
   } else if (command == "r") {
     resetEncoders();
   } else if (command.startsWith("m ")) {
-    int pulse_per_cycle_left = command.substring(2, command.indexOf(' ', 2)).toInt();
-    int pulse_per_cycle_right = command.substring(command.lastIndexOf(' ') + 1).toInt();
-    closedLoopSpeedControl(pulse_per_cycle_left,pulse_per_cycle_right);
+    pulse_per_cycle_left = command.substring(2, command.indexOf(' ', 2)).toInt();
+    pulse_per_cycle_right = command.substring(command.lastIndexOf(' ') + 1).toInt();
+    Ierror_l = 0.0;
+    Ierror_r = 0.0;
+    prev_error_l = 0.0;
+    prev_error_r = 0.0;
+    prev_enc_l = enc_val_l;
+    prev_enc_r = enc_val_r;
+    prev_time = millis();
+
+    run_closed_loop = true;
+  } else if (command == "s") {
+    run_closed_loop = false;
+    setMotorSpeed(MOTOR_L1, MOTOR_L2, 0);
+    setMotorSpeed(MOTOR_R1, MOTOR_R2, 0);
   } else {
     Serial.println("Invalid command");
   }
@@ -176,6 +171,9 @@ void loop() {
   if (Serial.available()) {
     processSerialCommand();
   }
-  delay(10);
+  
+  if (run_closed_loop) {
+    closedLoopSpeedControl();
+  }
 }
 

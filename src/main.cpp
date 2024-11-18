@@ -18,20 +18,23 @@
 #define MOTOR_R1 2
 #define MOTOR_R2 3
 // m 20 20
+// m 15 15
+
 volatile int enc_val_l = 0;
 volatile int enc_val_r = 0;
-const double Kp_l = 19.0; 
-const double Ki_l = 2.0;
-const double Kd_l = 2.5;
+const double Kp_l = 25.0; 
+const double Ki_l = 0.72;
+const double Kd_l = 2.15;
 
-const double Kp_r = 20.0; 
-const double Ki_r = 2.5;
-const double Kd_r = 2.5;
+const double Kp_r = 25.0; 
+const double Ki_r = 0.72;
+const double Kd_r = 2.15;
 
 double Ierror_l = 0.0;
 double Ierror_r = 0.0;
 double prev_error_l = 0.0;
 double prev_error_r = 0.0;
+const double MAX_IERROR = 255.0; // Define maximum integral error
 int prev_enc_l = enc_val_l;
 int prev_enc_r = enc_val_r;
 unsigned long prev_time = 0;
@@ -183,21 +186,25 @@ void processSerialCommand(String command) {
   }
 }
 
+unsigned long prev_time_micros = 0;
+
 void closedLoopSpeedControl() {
-  unsigned long current_time = millis();
-  double dt = (current_time - prev_time);  // Time difference in milliseconds
+  unsigned long current_time_micros = micros();
+  double dt = (current_time_micros - prev_time_micros) / 1000.0;  // Time difference in milliseconds
   if (dt >= 25) {  // Update every 25ms
     double error_l = pulse_per_cycle_left - (enc_val_l - prev_enc_l);
     Ierror_l += error_l;
-    double output_l = ((Kp_l * error_l) + (Kd_l * (error_l - prev_error_l)) + (Ki_l*Ierror_l));
+    Ierror_l = constrain(Ierror_l, -MAX_IERROR, MAX_IERROR);  // Constrain integral term
+    double output_l = ((Kp_l * error_l) + (Kd_l * (error_l - prev_error_l)) + (Ki_l * Ierror_l));
 
     double error_r = pulse_per_cycle_right - (enc_val_r - prev_enc_r);
     Ierror_r += error_r;
-    double output_r = ((Kp_r * error_r) + (Kd_r * (error_r - prev_error_r)) + (Ki_r*Ierror_r));
+    Ierror_r = constrain(Ierror_r, -MAX_IERROR, MAX_IERROR);  // Constrain integral term
+    double output_r = ((Kp_r * error_r) + (Kd_r * (error_r - prev_error_r)) + (Ki_r * Ierror_r));
 
     output_l = constrain(output_l, -255, 255);
     output_r = constrain(output_r, -255, 255);
-  
+
     setMotorSpeed(MOTOR_L1, MOTOR_L2, output_l);
     setMotorSpeed(MOTOR_R1, MOTOR_R2, output_r);
 
@@ -209,17 +216,20 @@ void closedLoopSpeedControl() {
     prev_error_l = error_l;
     prev_enc_r = enc_val_r;
     prev_enc_l = enc_val_l;
-    prev_time = current_time;
+    prev_time_micros = current_time_micros;
   }
 }
 
 void closedLoopControlTask(void *pvParameters) {
-  for (;;) {
-    if (run_closed_loop) {
-      closedLoopSpeedControl();
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(25);  // 40Hz
+    
+    for(;;) {
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        if (run_closed_loop) {
+            closedLoopSpeedControl();
+        }
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
 }
 
 void commandProcessingTask(void *pvParameters) {
@@ -231,8 +241,26 @@ void commandProcessingTask(void *pvParameters) {
   }
 }
 
+// Add new task for encoder publishing
+void encoderPublishTask(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(25);  // 40Hz
+    
+    for(;;) {
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        if (Serial.availableForWrite() > 40) {  // Ensure enough buffer space
+            double left_distance = (enc_val_l / PULSE_PER_METER) * 1000.0;
+            double right_distance = (enc_val_r / PULSE_PER_METER) * 1000.0;
+            Serial.print("Left encoder (mm): ");
+            Serial.print(left_distance, 2);
+            Serial.print(" Right encoder (mm): ");
+            Serial.println(right_distance, 2);
+        }
+    }
+}
+
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   pinMode(ENC_L1, INPUT_PULLUP);
   pinMode(ENC_L2, INPUT_PULLUP);
   pinMode(ENC_R1, INPUT_PULLUP);
@@ -254,8 +282,16 @@ void setup() {
 
   watchdogTimer = xTimerCreate("WatchdogTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, watchdogCallback);
 
-  xTaskCreatePinnedToCore(serialCommandTask, "SerialCommand", 2048, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(commandProcessingTask, "CommandProcessing", 2048, NULL, 2, NULL, 1);
+   // Increase serial buffer sizes
+  Serial.setRxBufferSize(256);
+  Serial.setTxBufferSize(256);
+  
+  // Create tasks with appropriate priorities
+  xTaskCreatePinnedToCore(serialCommandTask, "SerialCommand", 2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(commandProcessingTask, "CommandProcessing", 2048, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(encoderPublishTask, "EncoderPublish", 2048, NULL, 3, NULL, 1);
+  
+
 }
 
 void loop() {
